@@ -380,6 +380,15 @@ def _resolve_direct_command(hermes_path: str) -> list[str]:
     return command
 
 
+def _backend_spawn_env() -> dict[str, str]:
+    env = dict(os.environ)
+    env.pop("VIRTUAL_ENV", None)
+    env.pop("PYTHONPATH", None)
+    # The loopback auth gate requires this marker alongside the per-spawn SSH token.
+    env["HERMES_DESKTOP"] = "1"
+    return env
+
+
 def spawn_backend(payload: dict[str, Any]) -> dict[str, Any]:
     ownership_id = _ownership(str(payload["ownershipId"]))
     spawn_nonce = _nonce(str(payload["spawnNonce"]))
@@ -396,9 +405,7 @@ def spawn_backend(payload: dict[str, Any]) -> dict[str, Any]:
         args.extend(["--profile", profile])
     args.extend(["serve", "--isolated", "--host", "127.0.0.1", "--port", "0",
                  "--ssh-session-token-file", token_path, "--ssh-owner-nonce", spawn_nonce])
-    env = dict(os.environ)
-    env.pop("VIRTUAL_ENV", None)
-    env.pop("PYTHONPATH", None)
+    env = _backend_spawn_env()
     _ensure_scope(ownership_id)
     log_path = _log_path(ownership_id, spawn_nonce)
     win32con = _win32().win32con
