@@ -40,7 +40,9 @@ function stripPowerShellNoise(stdout) {
 // command shell is commonly cmd.exe, whose command-line limit is 8191 chars.
 // SshConnection.exec already supports streaming stdin to the remote command.
 function powerShellStdinCommand() {
-  return 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command [ScriptBlock]::Create([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String([Console]::In.ReadToEnd()))).Invoke()'
+  return powerShellCommand(
+    '$b=[Console]::In.ReadToEnd();& ([ScriptBlock]::Create([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($b))))'
+  )
 }
 
 async function probeWindowsRemote(ssh, explicitHermesPath = '') {
@@ -62,7 +64,7 @@ async function probeWindowsRemote(ssh, explicitHermesPath = '') {
     '}',
     '}',
     `$explicit=${explicit}`,
-    'if($explicit){Assert-NoReparse $explicit $false;$explicitPython=[IO.Path]::Combine([IO.Path]::GetDirectoryName($explicit), "python.exe");Assert-NoReparse $explicitPython $false}',
+    'if($explicit){Assert-NoReparse $explicit $false}',
     // HERMES_HOME is only trusted when it names a directory on the REMOTE: a stale User-scope
     // value (older install.ps1 persisted one) or a client path leaked over SSH otherwise fails
     // assertSafeRemoteHome as "Unsafe remote Hermes home" (#118988).
@@ -82,16 +84,26 @@ async function probeWindowsRemote(ssh, explicitHermesPath = '') {
     '$candidates=@()',
     'if($explicit){$candidates+=$explicit}',
     '$cmd=Get-Command hermes.exe -ErrorAction SilentlyContinue',
-    'if($cmd){Assert-NoReparse $cmd.Source $true;$cmdPython=[IO.Path]::Combine([IO.Path]::GetDirectoryName($cmd.Source), "python.exe");Assert-NoReparse $cmdPython $true;$candidates+=$cmd.Source}',
+    'if($cmd){Assert-NoReparse $cmd.Source $true;$candidates+=$cmd.Source}',
     '$candidates+=$fallbackHomeCandidate',
     '$candidates+=$fallbackProfileCandidate',
     '$hermes=$null',
-    'foreach($candidate in $candidates){Assert-NoReparse $candidate $true;$candidatePython=[IO.Path]::Combine([IO.Path]::GetDirectoryName($candidate), "python.exe");Assert-NoReparse $candidatePython $true;try{$item=Get-Item -LiteralPath $candidate -Force -ErrorAction Stop;if(($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0 -and -not $item.PSIsContainer){$hermes=$item.FullName;break}}catch [Management.Automation.ItemNotFoundException]{continue}}',
+    'foreach($candidate in $candidates){Assert-NoReparse $candidate $true;try{$item=Get-Item -LiteralPath $candidate -Force -ErrorAction Stop;if(($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0 -and -not $item.PSIsContainer){$hermes=$item.FullName;break}}catch [Management.Automation.ItemNotFoundException]{continue}}',
     'if(-not $hermes){throw "Hermes is not installed on the remote Windows host."}',
     'Assert-NoReparse $hermes $false',
     'if($explicit -and $hermes -ne $explicit){throw "The configured Hermes path is not an executable file."}',
-    '$python=[IO.Path]::Combine([IO.Path]::GetDirectoryName($hermes), "python.exe")',
+    '$runtimeJson=& $hermes --print-runtime-command',
+    'if($LASTEXITCODE -ne 0){throw "Hermes launcher could not report its runtime command."}',
+    '$runtime=ConvertFrom-Json -InputObject $runtimeJson',
+    'if(-not $runtime -or -not ($runtime[0] -is [string])){throw "Hermes launcher reported an invalid runtime command."}',
+    '$python=[string]$runtime[0]',
+    'if(-not [IO.Path]::IsPathRooted($python)){throw "Hermes launcher reported a relative runtime."}',
+    '$venvPython=[IO.Path]::Combine($hermesHome, "hermes-agent\\venv\\Scripts\\python.exe")',
+    'Assert-NoReparse $venvPython $true',
+    'if(Test-Path -LiteralPath $venvPython -PathType Leaf){$python=$venvPython}',
     'Assert-NoReparse $python $false',
+    "& $python -c 'import hermes_cli.windows_ssh_runtime' 2>$null",
+    'if($LASTEXITCODE -ne 0){throw "Hermes Python cannot import its Windows SSH helper."}',
     '[ordered]@{os="Windows";arch=$env:PROCESSOR_ARCHITECTURE;hermesHome=$hermesHome;hermesPath=$hermes;python=$python}|ConvertTo-Json -Compress'
   ].join('\r\n')
 

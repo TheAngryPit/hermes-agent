@@ -134,6 +134,10 @@ function sshWith(exec) {
 type SshExecOptions = { stdinData?: string | Buffer }
 
 function scriptFromInvocation(command: string, options: SshExecOptions = {}) {
+  if (options.stdinData) {
+    return Buffer.from(String(options.stdinData).trim(), 'base64').toString('utf16le')
+  }
+
   const encoded = command.match(/-EncodedCommand\s+([^\s]+)$/)?.[1]
 
   if (encoded) {
@@ -231,10 +235,7 @@ test('Windows relaunch gate refuses live and uncertain markers before executing 
         }),
       (error: any) => error.kind === 'update-in-progress'
     )
-    assert.equal(
-      scripts.some(script => script.includes('hermes_cli.windows_ssh_runtime')),
-      false
-    )
+    assert.equal(scripts.length, 2)
   }
 })
 
@@ -298,7 +299,7 @@ test('Windows relaunch gate uses strict install-wide marker parsing and fail-clo
   assert.doesNotMatch(script, /ErrorAction SilentlyContinue/)
 })
 
-test('Windows probe validates Hermes and Python topology before selection', async () => {
+test('Windows probe resolves Python through the selected Hermes launcher', async () => {
   let script = ''
   await probeWindowsRemote(
     sshWith(async (command, options) => {
@@ -315,28 +316,28 @@ test('Windows probe validates Hermes and Python topology before selection', asyn
     'C:\\\\h\\\\hermes.exe'
   )
 
-  const explicitCheck = script.indexOf('if($explicit){Assert-NoReparse $explicit $false;')
-  const explicitPythonCheck = script.indexOf('Assert-NoReparse $explicitPython $false')
+  const explicitCheck = script.indexOf('if($explicit){Assert-NoReparse $explicit $false}')
   const envHome = script.indexOf('$hermesHome=$env:HERMES_HOME')
   // #118988: HERMES_HOME is trusted only when it is a directory on the remote; anything else
   // (stale User-scope value, client path leaked over SSH) falls back to the remote default.
   const envHomeGuard = script.indexOf('Test-Path -LiteralPath $hermesHome -PathType Container')
   const fallbackJoin = script.indexOf('Join-Path $hermesHome')
-  const candidatePythonCheck = script.indexOf('Assert-NoReparse $candidatePython $true')
   const candidateSelection = script.indexOf('Get-Item -LiteralPath $candidate')
-  const pythonJoin = script.indexOf('$python=[IO.Path]::Combine')
+  const launcherCommand = script.indexOf('$runtimeJson=& $hermes --print-runtime-command')
+  const pythonJoin = script.indexOf('$python=[string]$runtime[0]')
   const pythonCheck = script.indexOf('Assert-NoReparse $python $false')
   const output = script.indexOf('[ordered]@{')
 
   assert.ok(explicitCheck >= 0)
-  assert.ok(explicitCheck < explicitPythonCheck)
-  assert.ok(explicitPythonCheck < envHome)
+  assert.ok(explicitCheck < envHome)
   assert.ok(envHome < envHomeGuard)
   assert.ok(envHomeGuard < fallbackJoin)
-  assert.ok(candidatePythonCheck >= 0)
-  assert.ok(candidatePythonCheck < candidateSelection)
-  assert.ok(pythonJoin >= 0)
+  assert.ok(candidateSelection >= 0)
+  assert.ok(launcherCommand > candidateSelection)
+  assert.ok(launcherCommand < pythonJoin)
   assert.ok(pythonJoin < pythonCheck)
+  assert.match(script, /hermes-agent\\venv\\Scripts\\python.exe/)
+  assert.match(script, /import hermes_cli\.windows_ssh_runtime/)
   assert.ok(pythonCheck < output)
 })
 
@@ -482,8 +483,11 @@ test('Windows platform probe streams long PowerShell scripts over stdin', async 
   })
 
   assert.equal(result.os, 'Windows')
-  assert.match(command, /-Command \[ScriptBlock\]::Create/)
-  assert.doesNotMatch(command, /-EncodedCommand/)
+  assert.match(command, /-EncodedCommand/)
+  assert.match(
+    Buffer.from(command.split(' ').at(-1) || '', 'base64').toString('utf16le'),
+    /\[Console\]::In.ReadToEnd\(\)/
+  )
   assert.ok(command.length < 1024)
   assert.match(stdinData, /^[A-Za-z0-9+/=\r\n]+$/)
   const decodedScript = Buffer.from(stdinData.trim(), 'base64').toString('utf16le')
@@ -633,7 +637,7 @@ test('platform detection preserves POSIX and falls back to Windows PowerShell', 
   )
 
   assert.equal(result.os, 'Windows')
-  assert.match(calls[1], /-Command \[ScriptBlock\]::Create/)
+  assert.match(calls[1], /-EncodedCommand/)
 })
 
 test('platform detection surfaces transport failures as themselves, not unsupported-platform', async () => {
